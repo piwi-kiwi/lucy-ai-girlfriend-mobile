@@ -1,0 +1,8 @@
+# LLM/HTTP: stdlib only (urllib). Nothing to install for serve.py.
+
+# TTS (pick what you use)
+edge-tts          # free neural voices, no API key
+kokoro-onnx       # optional local TTS (also: numpy, onnxruntime)
+
+# Optional local speech recognition (build whisper.cpp separately)
+# numpy           # used by kokoro_local.py to convert samples to WAV

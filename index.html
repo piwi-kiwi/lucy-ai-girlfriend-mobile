@@ -1,0 +1,994 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Lucy — autonome</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0d17;font-family:system-ui,sans-serif;color:#cfd8ff;
+    -webkit-tap-highlight-color:transparent}
+  #c{display:block;width:100%;height:100%;touch-action:none}
+  #chat{position:fixed;left:0;right:0;bottom:0;display:flex;gap:8px;padding:10px 12px 14px;
+        background:linear-gradient(to top,rgba(8,10,20,.92),rgba(8,10,20,0));align-items:center}
+  #say{flex:1;min-width:0;background:rgba(20,25,50,.85);border:1px solid #2c3568;color:#dfe6ff;
+       border-radius:20px;padding:11px 15px;font-size:14px;outline:none;font-family:inherit}
+  #say:focus{border-color:#4a58b8;box-shadow:0 0 0 3px rgba(80,100,220,.18)}
+  #say::placeholder{color:#6d78a8}
+  #send{width:44px;height:44px;flex:none;border-radius:50%;border:1px solid #3a4482;background:#25306e;
+        color:#dbe3ff;font-size:17px;line-height:1}
+  #send:disabled{opacity:.45}
+  #mic{width:44px;height:44px;flex:none;border-radius:50%;border:1px solid #3a4482;background:#1e2650;
+       color:#dfe6ff;line-height:1;display:flex;align-items:center;justify-content:center;padding:0}
+  #mic.on{background:#7a1f2b;border-color:#e0556b;color:#fff;box-shadow:0 0 0 0 rgba(224,85,107,.55);
+          animation:micpulse 1.15s ease-out infinite}
+  @keyframes micpulse{0%{box-shadow:0 0 0 0 rgba(224,85,107,.55)}
+                      70%{box-shadow:0 0 0 14px rgba(224,85,107,0)}
+                      100%{box-shadow:0 0 0 0 rgba(224,85,107,0)}}
+  @media (max-width:430px){#voice{max-width:76px;font-size:10px;padding:9px 4px}}
+  #voice{flex:none;max-width:112px;background:rgba(20,25,50,.9);border:1px solid #3a4482;color:#cfd8ff;
+         border-radius:18px;padding:10px 7px;font-size:11.5px;font-family:inherit;outline:none;
+         appearance:none;-webkit-appearance:none;text-align:center}
+  #sub{position:fixed;left:0;right:0;bottom:78px;text-align:center;font-size:12.5px;color:#8ea0e0;
+       text-shadow:0 1px 6px #000;padding:0 16px;pointer-events:none}
+  #err{position:fixed;inset:0;display:none;padding:14px;overflow:auto;font-size:11px;font-family:monospace;
+       color:#ffb3b3;background:rgba(20,0,0,.92);white-space:pre-wrap;z-index:99}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="sub"></div>
+<form id="chat" autocomplete="off">
+  <select id="voice" aria-label="voice"></select>
+  <input id="say" placeholder="Talk to her…" enterkeyhint="send" maxlength="300">
+  <button id="mic" type="button" aria-label="voice input">
+    <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="2.5" width="6" height="11" rx="3"></rect>
+      <path d="M5 11a7 7 0 0 0 14 0"></path>
+      <line x1="12" y1="18" x2="12" y2="21.5"></line>
+      <line x1="8.5" y1="21.5" x2="15.5" y2="21.5"></line>
+    </svg>
+  </button>
+  <button id="send" type="submit" aria-label="send">➤</button>
+</form>
+<div id="err"></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "./lib/three.module.js",
+    "three/addons/": "./lib/jsm/",
+    "three-vrm": "./lib/three-vrm.module.js"
+} }
+</script>
+
+<script>
+const errBox = document.getElementById('err'); const logs = [];
+function showErr(m, stack){
+  logs.push(m); errBox.style.display = 'block';
+  errBox.textContent = 'ERREUR\n\n' + logs.join('\n----\n') + (stack ? '\n\n' + stack : '');
+}
+addEventListener('error', e => showErr('error: ' + (e.message || e.error), e.error && e.error.stack));
+addEventListener('unhandledrejection', e => showErr('promise: ' + (e.reason && (e.reason.message || e.reason)), e.reason && e.reason.stack));
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { VRMLoaderPlugin, VRMUtils } from 'three-vrm';
+import { MixamoRetarget } from './retarget.js';
+
+/* ---------- rendu ---------- */
+const canvas = document.getElementById('c');
+const subEl = document.getElementById('sub');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d17);
+scene.fog = new THREE.Fog(0x0b0d17, 3.2, 8.0);   // elle (2,7 m) reste nette, la grille s'efface avant l'horizon
+
+const camera = new THREE.PerspectiveCamera(35, 1, 0.05, 200);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 1.0, 0);
+camera.position.set(0.4, 1.45, 2.6);
+controls.minDistance = 0.6;
+controls.maxDistance = 8;
+controls.maxPolarAngle = Math.PI * 0.50;   // jamais sous le sol
+
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x201030, 2.0));
+const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(1.5, 3, 2.5); scene.add(key);
+const rim = new THREE.DirectionalLight(0xff4fd8, 1.2); rim.position.set(-2, 1.6, -2.2); scene.add(rim);
+const fill = new THREE.DirectionalLight(0x40e0ff, 0.8); fill.position.set(2, 0.8, -1.5); scene.add(fill);
+// Plateforme circulaire (et non une grille infinie) : il n'y a plus d'horizon
+// à hauteur de taille. Les lignes s'effacent vers le bord, donc la caméra peut
+// rester à hauteur de visage sans que le sol ne "traverse" le corps.
+const GRID_R = 1.7;
+(function buildStage(){
+  const pos = [], col = [];
+  const inner = new THREE.Color(0x39428f), outer = new THREE.Color(0x0b0d17);
+  const push = (x1, z1, x2, z2) => {
+    const r1 = Math.hypot(x1, z1) / GRID_R, r2 = Math.hypot(x2, z2) / GRID_R;
+    const a = inner.clone().lerp(outer, Math.min(1, r1 * r1 * 1.15));
+    const b = inner.clone().lerp(outer, Math.min(1, r2 * r2 * 1.15));
+    pos.push(x1, 0, z1, x2, 0, z2);
+    col.push(a.r, a.g, a.b, b.r, b.g, b.b);
+  };
+  const step = 0.2125;
+  for (let c = -GRID_R; c <= GRID_R + 1e-6; c += step) {
+    const h = Math.sqrt(Math.max(0, GRID_R * GRID_R - c * c));
+    if (h < step * 0.5) continue;
+    push(-h, c, h, c);      // // X
+    push(c, -h, c, h);      // // Z
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const lines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false }));
+  lines.position.y = 0.001;
+  scene.add(lines);
+
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(GRID_R * 1.12, 64),
+    new THREE.MeshBasicMaterial({ color: 0x0d1024, transparent: true, opacity: 0.9,
+                                  depthWrite: false }));
+  disc.rotation.x = -Math.PI / 2;
+  disc.position.y = -0.001;
+  scene.add(disc);
+})();
+
+// tache d'ombre de contact : elle "pose" sur le sol au lieu de sembler enterrée
+function makeShadowBlob(){
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(64, 64, 3, 64, 64, 62);
+  grd.addColorStop(0, 'rgba(0,0,0,0.62)');
+  grd.addColorStop(0.5, 'rgba(0,0,0,0.26)');
+  grd.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true,
+                                  depthWrite: false, fog: false }));
+  m.rotation.x = -Math.PI / 2;
+  m.position.y = 0.004;
+  return m;
+}
+const shadowBlob = makeShadowBlob(); shadowBlob.scale.setScalar(0.9); scene.add(shadowBlob);
+
+const resize = () => {
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+};
+addEventListener('resize', resize); resize();
+
+/* ---------- état ---------- */
+const loader = new GLTFLoader();
+loader.register(p => new VRMLoaderPlugin(p));
+const retarget = new MixamoRetarget();
+// le yaw de correction est calculé automatiquement (repos VRM vs repos Xbot)
+const clock = new THREE.Clock();
+const followTmp = new THREE.Vector3();
+
+const MODEL = './lucy.vrm';        // <- fichier du personnage (ex. './avatar.vrm' pour Marin)
+const SRC = './anim/Xbot.glb';       // pack d'animations Mixamo
+const BOUNDS = 1.5;                // rayon de déplacement (elle reste près de toi)
+const WALK_SPEED = 1.05;           // m/s
+const WALK_CLIP_SPEED = 1.45;      // vitesse "naturelle" du clip walk à 1.0×
+
+let vrm = null, baseRotY = 0;
+let exprNames = [], refY = 1.0, refH = 1.6;
+let aimY = 0.85, fitDist = 2.7;   // hauteur visée / distance qui contient tout le corps
+let fps = 0, frames = 0, fpsT = performance.now();
+let blinkUntil = 0, nextBlink = performance.now() + 2000;
+let charH = 1.6;
+
+// orientation VISUELLE du corps dans le monde.
+// baseRotY vient de VRMUtils.rotateVRM0 (π pour un VRM 0.x), frameYaw de l'anim.
+const visYaw = () => baseRotY + brain.heading + (retarget.frameYaw || 0);
+const toFace = thetaWorld => thetaWorld - baseRotY - (retarget.frameYaw || 0);
+
+/* ---------- cerveau ---------- */
+const brain = {
+  state: 'rest',        // rest | walk | greet | nod | shake | sad
+  t: 0, dur: 3,
+  heading: Math.PI,     // orientation (rad) : face = (sin, 0, cos)
+  targetHeading: 0,
+  pos: new THREE.Vector3(),
+  dest: new THREE.Vector3(),
+  lookW: 0,             // poids du regard vers la caméra (0..1)
+  lookTarget: 0,
+  waveT: 0,
+  act: null,            // clip courant
+};
+
+const STATE_FR = { rest:'se repose', walk:'marche', greet:'te salue', nod:'acquiesce',
+                   shake:'dit non', sad:'boude', look:'te regarde' };
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+const wrap = a => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
+const angLerp = (a, b, t) => a + wrap(b - a) * t;
+
+function playClip(name){
+  if (brain.act === name) return;
+  retarget.play(SRC, name);
+  brain.act = name;
+}
+
+function setState(s, dur){
+  brain.state = s; brain.t = 0; brain.dur = dur;
+  if (s === 'walk'){
+    pickDest();
+    retarget.speed = WALK_SPEED / WALK_CLIP_SPEED;
+    playClip('walk');
+  } else {
+    retarget.speed = 1;
+    if (s === 'sad') playClip('sad_pose');
+    else if (s === 'nod') playClip('agree');
+    else if (s === 'shake') playClip('headShake');
+    else playClip('idle');
+  }
+  if (s === 'greet') brain.waveT = rnd(2.0, 2.5);
+  else brain.waveT = Math.min(brain.waveT, 0.3);   // le bras redescend en douceur
+  if (s === 'rest' && Math.random() < 0.65){          // s'arrête en te regardant
+    brain.targetHeading = toFace(Math.atan2(camera.position.x - brain.pos.x, camera.position.z - brain.pos.z));
+  }
+  brain.lookTarget = (s === 'walk') ? 0.35 : 1;
+}
+
+function pickDest(){
+  // 1 fois sur 3 elle vient vers toi (la caméra), sinon balade aléatoire
+  if (Math.random() < 0.34){
+    const dx = camera.position.x - brain.pos.x, dz = camera.position.z - brain.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const stop = 1.15;                                  // elle s'arrête à ~1,15 m de toi
+    brain.dest.set(brain.pos.x + dx / d * Math.max(0, d - stop),
+                  0,
+                  brain.pos.z + dz / d * Math.max(0, d - stop));
+  } else {
+    const a = rnd(0, Math.PI * 2), r = rnd(0.35, BOUNDS * 0.9);
+    brain.dest.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+  }
+  const rr = Math.hypot(brain.dest.x, brain.dest.z);
+  if (rr > BOUNDS) brain.dest.multiplyScalar(BOUNDS / rr);
+  brain.targetHeading = toFace(Math.atan2(brain.dest.x - brain.pos.x, brain.dest.z - brain.pos.z));
+}
+
+// décision suivante : pondérée selon la distance / position de la caméra
+function decide(now){
+  const camD = new THREE.Vector3().subVectors(camera.position, brain.pos).setY(0).length();
+  const toCam = Math.atan2(camera.position.x - brain.pos.x, camera.position.z - brain.pos.z);
+  const facing = Math.abs(wrap(toCam - visYaw()));   // 0 = elle te fait face
+  const r = Math.random();
+
+  // elle reste face à toi et ne part pas se promener au milieu d'une phrase
+  if (talk.active && brain.state !== 'walk') return setState('look', 2.5);
+
+  if (brain.state !== 'rest' && brain.state !== 'look'){
+    if (brain.state === 'walk') return setState('rest', rnd(3, 7));
+    return setState('rest', rnd(2, 4));
+  }
+
+  // elle te voit -> réactions sociales ; sinon elle reste dans le coin
+  const seen = camD < 6.5 && facing < 2.3;
+  if (seen && r < 0.18) return setState('greet', rnd(2.2, 3.0));   // coucou
+  if (seen && r < 0.40) return setState('nod', 1.9);               // acquiesce
+  if (seen && r < 0.48) return setState('shake', 2.6);             // dit non
+  if (r < 0.66) return setState('look', rnd(3, 6));                // te fixe
+  if (r < 0.76) return setState('sad', rnd(2.5, 4));               // boude
+  if (r < 0.90) return setState('walk', 0);                        // petite marche
+  return setState('rest', rnd(4, 8));                              // reste tranquille
+}
+
+/* ---------- chargement VRM ---------- */
+loader.load(MODEL, gltf => {
+  try {
+    vrm = gltf.userData.vrm;
+    if (!vrm) throw new Error('extension VRM absente');
+    try { VRMUtils.removeUnnecessaryVertices(gltf.scene); } catch (e) {}
+    try { VRMUtils.rotateVRM0(vrm); } catch (e) { vrm.scene.rotation.y = Math.PI; }
+    baseRotY = vrm.scene.rotation.y;
+
+    scene.add(vrm.scene);
+    vrm.scene.updateMatrixWorld(true);
+
+    const box = new THREE.Box3().setFromObject(vrm.scene);
+    const size = box.getSize(new THREE.Vector3());
+    charH = size.y; refH = size.y;
+    refY = box.getCenter(new THREE.Vector3()).y;
+
+    // cadre : elle doit tenir entière (cheveux compris) avec 10 % de marge,
+    // la caméra est à hauteur de poitrine, pas au-dessus.
+    aimY = refH * 0.55;
+    const vfov = THREE.MathUtils.degToRad(camera.fov);
+    fitDist = THREE.MathUtils.clamp((refH * 1.06 * 0.55) / Math.tan(vfov / 2), 1.3, 6);
+    camera.position.set(0.10 * fitDist, aimY + fitDist * 0.06, fitDist);   // ~1,5° de plongée : hauteur de visage
+    camera.near = Math.max(0.01, refH / 500); camera.far = refH * 80;
+    camera.updateProjectionMatrix();
+    controls.target.set(0, aimY, 0);
+    controls.minDistance = fitDist * 0.35;
+    controls.maxDistance = fitDist * 2.2;
+    controls.update();
+
+    const em = vrm.expressionManager;
+    exprNames = em ? (em.expressions || []).map(e => e.expressionName).filter(Boolean) : [];
+    EXPR = new Map(exprNames.map(n => [n.toLowerCase(), n]));
+
+    retarget.attachVRM(vrm, size.y);
+    if (vrm.lookAt) vrm.lookAt.target = camera;          // les yeux te suivent
+
+    brain.heading = brain.targetHeading = toFace(0);   // face à la caméra au départ
+    brain.pos.set(0, 0, 0);
+
+    loadAnimations();
+  } catch (e) { showErr('VRM: ' + e.message, e.stack); }
+},
+undefined,
+e => showErr('VRM: ' + (e?.message || e), e?.stack));
+
+async function loadAnimations(){
+  try {
+    await retarget.load(loader, SRC);
+    setState('rest', 2.5);
+    brain.heading = brain.targetHeading = toFace(0);   // le yaw réel n'est connu qu'ici
+  } catch (e) { showErr('anim: ' + e.message, e.stack); }
+}
+
+/* ---------- regard (yeux + tête + buste) ---------- */
+function applyLook(dt){
+  const em = vrm?.humanoid; if (!em) return;
+  const neck = vrm.humanoid.getNormalizedBoneNode('neck');
+  const head = vrm.humanoid.getNormalizedBoneNode('head');
+  const chest = vrm.humanoid.getNormalizedBoneNode('chest');
+  if (!head) return;
+
+  // poids du regard : max quand elle est immobile et que tu es proche
+  const moving = brain.state === 'walk';
+  const camD = new THREE.Vector3().subVectors(camera.position, brain.pos).setY(0).length();
+  const want = moving ? 0.35 : THREE.MathUtils.clamp(1.15 - camD / 4.5, 0.25, 1);
+  brain.lookW += (want - brain.lookW) * (1 - Math.exp(-dt * 3));
+
+  const headWorldY = brain.pos.y + charH * 0.94;
+  const toCam = Math.atan2(camera.position.x - brain.pos.x, camera.position.z - brain.pos.z);
+  let yawErr = wrap(toCam - visYaw());
+  yawErr = THREE.MathUtils.clamp(yawErr, -1.05, 1.05) * brain.lookW;   // pas de tête à 180°
+
+  const horiz = Math.max(0.25, Math.hypot(camera.position.x - brain.pos.x, camera.position.z - brain.pos.z));
+  const pitch = THREE.MathUtils.clamp(Math.atan2(camera.position.y - headWorldY, horiz), -0.5, 0.5) * brain.lookW;
+
+  const k = 1 - Math.exp(-dt * 6);
+  const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yawErr * k * 0.5);
+  const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -pitch * k * 0.5);
+
+  if (chest && !moving){
+    chest.quaternion.premultiply(qy.clone().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yawErr * k * 0.12));
+  }
+  if (neck){
+    neck.quaternion.multiply(qy.clone().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yawErr * k * 0.4));
+    neck.quaternion.multiply(qx.clone().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -pitch * k * 0.4));
+  }
+  head.quaternion.multiply(qy.clone().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yawErr * k * 0.5));
+  head.quaternion.multiply(qx.clone().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -pitch * k * 0.5));
+}
+
+/* ---------- geste de salut ----------
+   Mesures sur le VRM : en espace os normalisé elle regarde -Z, le bras droit
+   pointe +X, l'avant-bras continue +X. On remplace donc les *deltas* de l'anim
+   (pas les quaternions locaux) par une orientation absolue : bras levé, avant-bras
+   vertical, puis on recalcule les locaux comme le retarget. */
+const AXIS_X = new THREE.Vector3(1, 0, 0);
+const _qArm = new THREE.Quaternion(), _qFore = new THREE.Quaternion(), _qHand = new THREE.Quaternion();
+const _dirArm = new THREE.Vector3(), _dirFore = new THREE.Vector3(), _dirHand = new THREE.Vector3();
+
+function applyWave(dt){
+  if (brain.waveT <= 0 || !vrm?.humanoid) return;
+  brain.waveT -= dt;
+  const R = retarget;
+  const nA = R.nodes['rightUpperArm'], nF = R.nodes['rightLowerArm'], nH = R.nodes['rightHand'];
+  const dA = R.deltaWorld['rightUpperArm'], dF = R.deltaWorld['rightLowerArm'];
+  const pS = R.deltaWorld['rightShoulder'];
+  if (!nA || !nF || !dA || !dF || !pS) return;
+
+  const t = performance.now() / 1000;
+  const k = THREE.MathUtils.clamp(brain.waveT / 0.35, 0, 1) * Math.min(1, (2.6 - brain.waveT) / 0.25);
+  const sway = 0.22 * Math.sin(t * 6.5);
+
+  _dirArm.set(0.62, 0.80, -0.20).normalize();          // bras en l'air
+  _dirFore.set(0.12 + sway, 1.0, -0.20).normalize();   // avant-bras vertical qui balance
+  _dirHand.set(0.06 + sway, 1.0, -0.24).normalize();   // la main CONTINUE vers le haut
+  _qArm.setFromUnitVectors(AXIS_X, _dirArm);
+  _qFore.setFromUnitVectors(AXIS_X, _dirFore);
+  _qHand.setFromUnitVectors(AXIS_X, _dirHand);
+
+  // on garde le delta animé de la main, puis on le fait tendre vers "main vers le haut"
+  const dHandAnim = R.deltaWorld['rightHand'] ? R.deltaWorld['rightHand'].clone() : _qHand.clone();
+  dA.slerp(_qArm, k);
+  dF.slerp(_qFore, k);
+  const dHand = dHandAnim.slerp(_qHand, k);
+
+  nA.quaternion.copy(pS).invert().multiply(dA);
+  nF.quaternion.copy(dA).invert().multiply(dF);
+  if (nH) nH.quaternion.copy(dF).invert().multiply(dHand);
+}
+
+/* ---------- dialogue : LLM local + voix + synchro labiale ---------- */
+const VOW = 'aàâäeéèêëiîïoôöuùûüy';
+const VOW_RE = new RegExp('[' + VOW + VOW.toUpperCase() + ']+', 'g');
+const MOUTH = ['a', 'i', 'u', 'e', 'o'];
+const talk = { active: false, text: '', clean: '', tags: [], tDur: 0, plan: [], t0: 0, dur: 0, idx: -1,
+               w: { a: 0, i: 0, u: 0, e: 0, o: 0 }, stopAt: 0 };
+
+function planMouth(text){
+  // syllabes approximatives -> (début, fin, voyelle, ouverture)
+  const syl = [];
+  for (const w of text.split(/\s+/).filter(Boolean)){
+    const g = w.match(VOW_RE) || [];
+    if (!g.length){ if (syl.length) syl[syl.length - 1].hold += 60; continue; }
+    for (const grp of g) syl.push({ grp, hold: 0 });
+    if (/[.!?…]$/.test(w)) syl[syl.length - 1].hold += 190;
+    else if (/[,;:]$/.test(w)) syl[syl.length - 1].hold += 110;
+    syl[syl.length - 1].hold += 55;                       // respiration entre les mots
+  }
+  const plan = [];
+  let t = 0;
+  for (const s of syl){
+    const v = s.grp.toLowerCase();
+    let shape = 'a';
+    if (/[uùûüoôö]/.test(v) && /ou|u|o/.test(v)) shape = /ou/.test(v) ? 'u' : 'o';
+    if (/[iîïy]/.test(v)) shape = 'i';
+    if (/[eéèêë]/.test(v) && shape === 'a') shape = 'e';
+    if (/[aàâä]/.test(v)) shape = 'a';
+    const dur = 62 + 26 * v.length + s.hold;
+    plan.push({ t0: t, t1: t + dur * 0.62, v: shape, w: 0.55 + Math.random() * 0.4 });
+    t += dur;
+    plan.push({ t0: t - 28, t1: t, v: 'a', w: 0 });        // fermeture de bouche
+  }
+  return plan;
+}
+
+let voiceFR = null;
+function pickVoice(){
+  if (!('speechSynthesis' in window)) return;
+  const vs = speechSynthesis.getVoices() || [];
+  if (!vs.length) return;
+  voiceFR = vs.find(v => /^fr/i.test(v.lang) && /fr/i.test(v.name || v.voiceURI || ''))
+         || vs.find(v => /^fr/i.test(v.lang)) || null;
+}
+if ('speechSynthesis' in window){
+  pickVoice();
+  speechSynthesis.onvoiceschanged = pickVoice;
+}
+
+let audioCtx = null, analyser = null, toneBuf = null, player = null;
+let voiceSrc = '—';   // diagnostic : moteur réellement utilisé
+
+// --- choix de la voix (test à la volée) ---
+const VOICES = [
+  { l: 'JP alpha',      e: 'kokoro', v: 'jf_alpha' },
+  { l: 'JP gongitsune', e: 'kokoro', v: 'jf_gongitsune' },
+  { l: 'JP tebukuro',   e: 'kokoro', v: 'jf_tebukuro' },
+  { l: 'JP kumo (M)',   e: 'kokoro', v: 'jm_kumo' },
+  { l: 'US Heart',      e: 'kokoro', v: 'af_heart' },
+  { l: 'US Bella',      e: 'kokoro', v: 'af_bella' },
+  { l: 'UK Emma',       e: 'kokoro', v: 'bf_emma' },
+  { l: 'Edge Aria',     e: 'edge',   v: 'en-US-AriaNeural' },
+  { l: 'Edge Jenny',    e: 'edge',   v: 'en-US-JennyNeural' },
+];
+const vsel = document.getElementById('voice');
+VOICES.forEach((o, i) => { const op = document.createElement('option'); op.value = i; op.textContent = o.l; vsel.appendChild(op); });
+vsel.value = String(Math.min(+localStorage.getItem('lucyVoice') || 0, VOICES.length - 1));
+function curVoice(){ return VOICES[+vsel.value] || VOICES[0]; }
+vsel.addEventListener('change', () => {
+  localStorage.setItem('lucyVoice', vsel.value);
+  const v = curVoice();
+  voiceSrc = v.l;
+  stopVoice();
+  speak('Okay, this is my new voice. What do you think?');
+});
+let rmsS = 0, zcrS = 0;
+
+function ensureAudio(){
+  try {
+    if (!audioCtx){
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return true;
+  } catch (e) { return false; }
+}
+
+function stopVoice(){
+  if (player){ try { player.pause(); } catch (e) {} player = null; }
+  if ('speechSynthesis' in window){ try { speechSynthesis.cancel(); } catch (e) {} }
+  talk.active = false; talk.audio = false; talk.stopAt = 0;
+  talk.tags = []; talk.tDur = 0;
+  analyser = null;
+}
+
+async function speak(text, tags){
+  if (!text) return;
+  stopVoice();
+  talk.text = text;
+  talk.clean = text;
+  talk.tags = (tags || []).map(t => ({ ...t, done: false, time: 0 }));
+  talk.tDur = 0;
+  talk.plan = planMouth(text);
+  talk.dur = talk.plan.length ? talk.plan[talk.plan.length - 1].t1 : Math.max(900, text.length * 70);
+  talk.idx = -1;
+  talk.active = true;          // comportement : elle te fait face, elle ne part pas
+  talk.audio = false;          // la bouche ne bouge qu'au son
+  talk.t0 = performance.now();
+  talk.w = { a: 0, i: 0, u: 0, e: 0, o: 0 };
+
+  // 1) voix neuronale (edge-tts) servie par /api/tts
+  try {
+    const V = curVoice();
+    const r = await fetch('./api/tts?engine=' + encodeURIComponent(V.e) +
+                          '&voice=' + encodeURIComponent(V.v) +
+                          '&text=' + encodeURIComponent(text));
+    if (!r.ok) throw new Error('tts HTTP ' + r.status);
+    const blob = await r.blob();
+    if (blob.size < 800) throw new Error('tts vide');
+    const url = URL.createObjectURL(blob);
+    const el = new Audio();
+    el.src = url;
+    el.preload = 'auto';
+    player = el;
+    if (ensureAudio()){
+      try {
+        const src = audioCtx.createMediaElementSource(el);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.35;
+        toneBuf = new Uint8Array(analyser.fftSize);
+        src.connect(analyser);
+        analyser.connect(audioCtx.destination);
+      } catch (e) { analyser = null; }
+    }
+    el.onended = () => { talk.active = false; talk.audio = false; URL.revokeObjectURL(url); };
+    await el.play();
+    talk.t0 = performance.now();
+    talk.audio = true;                       // ça y est, le son sort
+    voiceSrc = V.l;
+    return;
+  } catch (e) {
+    console.warn('voix neuronale indisponible (' + e.message + ') → voix du système');
+    voiceSrc = 'système Android (repli)';
+    analyser = null;
+  }
+
+  // 2) repli : voix du téléphone, synchro syllabique estimée
+  talk.audio = true;
+  talk.t0 = performance.now() + 140;
+  talk.stopAt = 0;
+  if (!('speechSynthesis' in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'en-US'; u.rate = 1.0; u.pitch = 1.12;
+    if (voiceFR) u.voice = voiceFR;
+    u.onstart = () => { talk.t0 = performance.now(); };
+    u.onboundary = (ev) => {
+      if (!talk.dur || !text.length) return;
+      talk.t0 = performance.now() - (ev.charIndex / text.length) * talk.dur;
+    };
+    u.onend = () => { talk.stopAt = performance.now() + 120; };
+    speechSynthesis.speak(u);
+  } catch (e) { console.warn('TTS', e); }
+}
+
+// bouche : amplitude réelle du son (RMS) + timbre (taux de passage par zéro)
+function applyMouth(now){
+  const tgt = { a: 0, i: 0, u: 0, e: 0, o: 0 };
+  if (talk.active && talk.audio){
+    if (analyser && toneBuf){
+      analyser.getByteTimeDomainData(toneBuf);
+      let sum = 0, zc = 0, prev = toneBuf[0];
+      for (let i = 0; i < toneBuf.length; i++){
+        const v = (toneBuf[i] - 128) / 128;
+        sum += v * v;
+        if ((v > 0) !== (prev > 0) && Math.abs(v) > 0.03) zc++;
+        prev = v;
+      }
+      const rms = Math.sqrt(sum / toneBuf.length);
+      const zcr = zc / toneBuf.length;
+      rmsS += (rms - rmsS) * 0.5;
+      zcrS += (zcr - zcrS) * 0.22;
+      const open = THREE.MathUtils.clamp((rmsS - 0.010) * 6.0, 0, 1);
+      const k = THREE.MathUtils.clamp((zcrS - 0.015) / 0.075, 0, 1);
+      if (k < 0.34){ tgt.o = open * 0.85; tgt.u = open * 0.30; }
+      else if (k > 0.64){ tgt.i = open * 0.90; tgt.e = open * 0.35; }
+      else { tgt.a = open * 1.0; }
+    } else {
+      // pas d'analyseur : on suit le plan syllabique
+      const el = now - talk.t0;
+      if (el >= 0 && el <= talk.dur + 60){
+        while (talk.idx + 1 < talk.plan.length && el >= talk.plan[talk.idx + 1].t1) talk.idx++;
+        const p = talk.plan[Math.max(0, talk.idx)];
+        if (p && el >= p.t0 && el < p.t1) tgt[p.v] = p.w;
+      } else if (el > talk.dur + 60 || (talk.stopAt && now > talk.stopAt)){
+        talk.active = false; talk.audio = false;
+      }
+    }
+  }
+  const k = 1 - Math.exp(-26 / 60);
+  for (const m of MOUTH){
+    talk.w[m] += (tgt[m] - talk.w[m]) * k;
+    if (talk.w[m] > 0.004) setExpr(m, talk.w[m]);
+  }
+}
+
+const chatForm = document.getElementById('chat');
+const sayEl = document.getElementById('say');
+const sendEl = document.getElementById('send');
+const history = [];
+let busy = false;
+
+function sub(line){ subEl.textContent = line || ''; }
+
+/* ---------- micro : on lui parle au lieu d'écrire ---------- */
+const micEl = document.getElementById('mic');
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, listening = false, recFinal = '';
+
+function micStop(){
+  listening = false;
+  micEl.classList.remove('on');
+  try { if (rec) rec.stop(); } catch (e) {}
+}
+
+function micStart(){
+  if (listening){ micStop(); return; }
+  if (!SR){ micRecStart(); return; }        // pas de moteur intégré -> on enregistre et on envoie
+  stopVoice();                       // pas de larsen : on coupe sa voix
+  if (!rec){
+    rec = new SR();
+    rec.lang = 'fr-FR';
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (e) => {
+      let txt = '';
+      for (let i = 0; i < e.results.length; i++) txt += e.results[i][0].transcript;
+      sayEl.value = txt;
+      for (let i = e.resultIndex; i < e.results.length; i++)
+        if (e.results[i].isFinal) recFinal = e.results[i][0].transcript;
+    };
+    rec.onerror = (e) => {
+      micStop();
+      const err = e.error || 'erreur';
+      if (err !== 'no-speech' && err !== 'aborted') sub('⚠ mic: ' + err);
+      else if (err === 'no-speech') sub('(I didn\'t hear anything)');
+    };
+    rec.onend = () => {
+      const wasListening = listening;
+      micStop();
+      const t = (recFinal || sayEl.value || '').trim();
+      recFinal = '';
+      sayEl.value = '';
+      if (t){ sub(''); ask(t); }
+      else if (wasListening) sayEl.value = '';
+    };
+  }
+  recFinal = '';
+  sayEl.value = '';
+  try { rec.start(); listening = true; micEl.classList.add('on'); }
+  catch (e) { listening = false; micEl.classList.remove('on'); sub('⚠ mic: ' + e.message); }
+}
+/* ---------- repli : on enregistre et le serveur transcrit (whisper.cpp) ---------- */
+let mStream = null, mCtx = null, mProc = null, mSrc = null, mChunks = [], mVoiceLen = 0;
+
+function encodeWav(chunks, srcRate){
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const buf = new Float32Array(total);
+  let o = 0;
+  for (const c of chunks){ buf.set(c, o); o += c.length; }
+  const dst = 16000, ratio = srcRate / dst, n = Math.max(1, Math.floor(buf.length / ratio));
+  const pcm = new DataView(new ArrayBuffer(44 + n * 2));
+  const wr = (off, str) => { for (let i = 0; i < str.length; i++) pcm.setUint8(off + i, str.charCodeAt(i)); };
+  wr(0, 'RIFF'); pcm.setUint32(4, 36 + n * 2, true); wr(8, 'WAVE'); wr(12, 'fmt ');
+  pcm.setUint32(16, 16, true); pcm.setUint16(20, 1, true); pcm.setUint16(22, 1, true);
+  pcm.setUint32(24, dst, true); pcm.setUint32(28, dst * 2, true);
+  pcm.setUint16(32, 2, true); pcm.setUint16(34, 16, true);
+  wr(36, 'data'); pcm.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++){
+    const x = i * ratio, i0 = Math.floor(x), f = x - i0;
+    const s = (buf[i0] || 0) * (1 - f) + (buf[i0 + 1] || buf[i0] || 0) * f;
+    pcm.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 32767, true);
+  }
+  return new Blob([pcm], { type: 'audio/wav' });
+}
+
+async function micRecStart(){
+  if (listening){ micRecStop(); return; }
+  stopVoice();
+  try {
+    mStream = await navigator.mediaDevices.getUserMedia({ audio: {
+      channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch (e){
+    sub('⚠ mic blocked (' + e.name + ')');
+    return;
+  }
+  mCtx = new (window.AudioContext || window.webkitAudioContext)();
+  await mCtx.resume();
+  mSrc = mCtx.createMediaStreamSource(mStream);
+  mProc = mCtx.createScriptProcessor(4096, 1, 1);
+  mChunks = []; mVoiceLen = 0;
+  let quiet = performance.now(), spoke = false;
+  mProc.onaudioprocess = (ev) => {
+    const d = ev.inputBuffer.getChannelData(0);
+    mChunks.push(new Float32Array(d));
+    let sum = 0;
+    for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
+    const rms = Math.sqrt(sum / d.length);
+    const now = performance.now();
+    if (rms > 0.02){ spoke = true; quiet = now; }
+    else if (spoke && now - quiet > 1200) micRecStop();      // fin de phrase
+    if (now - quiet > 9000) micRecStop();                    // sécurité
+  };
+  mSrc.connect(mProc);
+  mProc.connect(mCtx.destination);
+  listening = true; micEl.classList.add('on');
+  sub('listening…');
+}
+
+async function micRecStop(){
+  if (!listening) return;
+  listening = false; micEl.classList.remove('on');
+  try { mProc.disconnect(); } catch (e) {}
+  try { mSrc.disconnect(); } catch (e) {}
+  try { mStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  const rate = mCtx ? mCtx.sampleRate : 48000;
+  const chunks = mChunks; mChunks = [];
+  try { mCtx.close(); } catch (e) {}
+  mCtx = mProc = mSrc = mStream = null;
+  if (!chunks.length){ sub(''); return; }
+  sub('… thinking');
+  try {
+    const blob = encodeWav(chunks, rate);
+    const r = await fetch('./api/stt', { method: 'POST', body: blob });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    const t = (j.text || '').trim();
+    if (!t){ sub('(I didn\'t catch that)'); return; }
+    sub('');
+    ask(t);
+  } catch (e){
+    sub('⚠ transcription: ' + (e.message || e));
+  }
+}
+
+micEl.addEventListener('click', micStart);
+
+async function ask(text){
+  if (busy) return;
+  busy = true; sendEl.disabled = true;
+  history.push({ role: 'user', content: text });
+  sub('…');
+  try {
+    const r = await fetch('./api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: history.slice(-14) })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    const reply = (j.text || '').trim();
+    if (!reply) throw new Error('réponse vide');
+    const { clean, ev } = parseTags(reply);
+    const mouth = clean || reply;
+    history.push({ role: 'assistant', content: mouth });
+    sub(mouth);
+    speak(mouth, ev);
+    if (brain.state === 'walk') setState('rest', 3);
+    if (Math.random() < 0.45) setState(Math.random() < 0.6 ? 'nod' : 'look', 2.2);
+  } catch (e){
+    sub('⚠ ' + (e.message || e));
+    console.warn(e);
+  } finally {
+    busy = false; sendEl.disabled = false;
+  }
+}
+
+chatForm.addEventListener('submit', ev => {
+  ev.preventDefault();
+  const v = sayEl.value.trim();
+  if (!v) return;
+  sayEl.value = '';
+  sayEl.blur();
+  ask(v);
+});
+sayEl.addEventListener('focus', stopVoice);
+
+/* ---------- expressions ---------- */
+// ce VRM 0.x expose 'Blink', 'Joy', 'Sorrow'… -> on résout sans tenir compte de la casse
+const ALIAS = { happy:'joy', sad:'sorrow', relaxed:'fun', surprised:'surprised',
+                aa:'a', ih:'i', ou:'u', ee:'e', oh:'o',
+                blinkleft:'blink_l', blinkright:'blink_r' };
+let EXPR = new Map();   // rempli après chargement du VRM
+function resolveExpr(name){
+  return EXPR.get(name.toLowerCase()) || EXPR.get((ALIAS[name.toLowerCase()] || '').toLowerCase()) || null;
+}
+function setExpr(name, w){
+  const em = vrm?.expressionManager; if (!em) return;
+  const k = resolveExpr(name);
+  if (k) em.setValue(k, w);
+}
+
+/* ---------- balises du LLM : {joie} {salue} {regarde:camera} … ---------- */
+const llmFace = { name: null, w: 0, until: 0 };
+const llmEye  = { name: null, w: 0, until: 0 };
+const FACE_TAGS = {
+  joy:'happy', happy:'happy', smile:'happy', grin:'happy', laugh:'happy',
+  joie:'happy', sourire:'happy', contente:'happy', rire:'happy',
+  sad:'sad', triste:'sad', sadness:'sad',
+  angry:'angry', mad:'angry', colere:'angry', agacee:'angry', enerve:'angry',
+  surprised:'surprised', surprise:'surprised', shocked:'surprised', etonnee:'surprised',
+  calm:'relaxed', relaxed:'relaxed', calme:'relaxed', detendue:'relaxed',
+  neutral:'neutral', neutre:'neutral',
+};
+const EYE_TAGS = { gauche:'lookleft', droite:'lookright', haut:'lookup', bas:'lookdown',
+                   left:'lookleft', right:'lookright', up:'lookup', down:'lookdown' };
+const TAG_RE = /\{([a-zà-ÿ_]+)(?::([^}]*))?\}/gi;
+
+function parseTags(text){
+  const ev = []; let clean = '', last = 0, m;
+  TAG_RE.lastIndex = 0;
+  while ((m = TAG_RE.exec(text)) !== null){
+    clean += text.slice(last, m.index);
+    ev.push({ at: clean.length, kind: m[1].toLowerCase(), arg: (m[2] || '').trim().toLowerCase() });
+    last = TAG_RE.lastIndex;
+  }
+  clean += text.slice(last);
+  clean = clean.replace(/\s{2,}/g, ' ').trim();
+  return { clean, ev };
+}
+
+function applyTag(kind, arg){
+  const now = performance.now();
+  const k = kind;
+  if (FACE_TAGS[k]){
+    llmFace.name = FACE_TAGS[k];
+    llmFace.w = (k === 'sourire') ? 0.65 : 0.95;
+    llmFace.until = now + 2800;
+    return;
+  }
+  if (k === 'blink' || k === 'cligne' || k === 'clignement'){ blinkUntil = now + 140; return; }
+  if (k === 'wave' || k === 'salue' || k === 'coucou' || k === 'hello'){ setState('greet', rnd(2.0, 2.6)); return; }
+  if (k === 'nod' || k === 'hoche' || k === 'yes'){ setState('nod', 1.9); return; }
+  if (k === 'shake' || k === 'secoue' || k === 'no'){ setState('shake', 2.2); return; }
+  if (k === 'closer' || k === 'back' || k === 'approche' || k === 'recule'){
+    const near = (k === 'closer' || k === 'approche');
+    const dir = new THREE.Vector3().subVectors(camera.position, brain.pos).setY(0).normalize();
+    brain.pos.addScaledVector(dir, near ? 0.4 : -0.4);
+    const r = Math.hypot(brain.pos.x, brain.pos.z);
+    if (r > BOUNDS) brain.pos.multiplyScalar(BOUNDS / r);
+    return;
+  }
+  if (k === 'look' || k === 'regarde'){
+    const e = EYE_TAGS[arg];
+    if (e){ llmEye.name = e; llmEye.w = 0.9; llmEye.until = now + 1800; }
+    else { brain.lookTarget = 1; }
+    return;
+  }
+  if (k === 'walk' || k === 'marche'){ setState('walk', 0); return; }
+}
+
+// déclenche les balises au fil de l'audio (proportion caractères -> temps)
+function pumpTags(){
+  const tags = talk.tags;
+  if (!tags || !tags.length || !player || !talk.audio) return;
+  const d = player.duration;
+  if (!(d > 0)) return;
+  if (!talk.tDur){
+    talk.tDur = d;
+    const n = Math.max(1, talk.clean.length);
+    for (const t of tags) t.time = (t.at / n) * d * 0.98;
+  }
+  const ct = player.currentTime;
+  for (const t of tags){
+    if (!t.done && ct >= t.time){ t.done = true; applyTag(t.kind, t.arg); }
+  }
+}
+
+function expressions(now, dt){
+  const em = vrm?.expressionManager; if (!em) return;
+  for (const n of exprNames) em.setValue(n, 0);
+
+  // clignements aléatoires (double 1 fois sur 4)
+  if (now > nextBlink){
+    blinkUntil = now + rnd(110, 160);
+    nextBlink = now + (Math.random() < 0.25 ? rnd(320, 460) : rnd(2400, 6800));
+  }
+  if (now < blinkUntil) setExpr('blink', 1);
+
+  // micro-sourire quand elle te salue ou te regarde
+  if (brain.state === 'greet' || brain.state === 'look') setExpr('happy', 0.45);
+  if (brain.state === 'sad') setExpr('sad', 0.5);
+  if (brain.state === 'nod') setExpr('happy', 0.25);
+
+  // le LLM a la main : ses balises écrasent l'expression automatique
+  if (llmFace.name && now < llmFace.until) setExpr(llmFace.name, llmFace.w);
+  if (llmEye.name && now < llmEye.until) setExpr(llmEye.name, llmEye.w);
+
+  applyMouth(now);
+  em.update();
+}
+
+/* ---------- boucle ---------- */
+function animate(){
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (vrm){
+    try {
+      // cerveau : décisions
+      brain.t += dt;
+      if (brain.state === 'walk'){
+        const d = Math.hypot(brain.dest.x - brain.pos.x, brain.dest.z - brain.pos.z);
+        const camD = Math.hypot(camera.position.x - brain.pos.x, camera.position.z - brain.pos.z);
+        if (d < 0.12 || camD < 0.85 || brain.t > 18) setState('rest', rnd(2.5, 5));
+      } else if (brain.t > brain.dur){
+        decide(now);
+      }
+
+      // orientation : dès qu'elle ne marche pas, elle se tourne vers la caméra
+      if (brain.state !== 'walk'){
+        brain.targetHeading = toFace(Math.atan2(camera.position.x - brain.pos.x, camera.position.z - brain.pos.z));
+      }
+      brain.heading = angLerp(brain.heading, brain.targetHeading, 1 - Math.exp(-dt * 3.2));
+      vrm.scene.rotation.y = baseRotY + brain.heading;
+
+      // déplacement
+      if (brain.state === 'walk'){
+        const vf = visYaw();
+        const fx = Math.sin(vf), fz = Math.cos(vf);
+        const faceErr = Math.abs(wrap(brain.targetHeading - brain.heading));
+        const spd = WALK_SPEED * Math.max(0.25, Math.cos(Math.min(faceErr, Math.PI / 2)));
+        brain.pos.x += fx * spd * dt;
+        brain.pos.z += fz * spd * dt;
+        const r = Math.hypot(brain.pos.x, brain.pos.z);
+        if (r > BOUNDS){ brain.pos.multiplyScalar(BOUNDS / r); pickDest(); }
+        retarget.speed = spd / WALK_CLIP_SPEED;
+      }
+      vrm.scene.position.set(brain.pos.x, 0, brain.pos.z);
+      shadowBlob.position.set(brain.pos.x, 0.004, brain.pos.z);
+
+      // animation squelettique (retarget Mixamo) + surcouches
+      retarget.update(dt);
+      applyLook(dt);
+      applyWave(dt);
+      pumpTags();
+      expressions(now, dt);
+
+      vrm.update(dt);                       // -> os réels, spring bones (cheveux), lookAt
+    } catch (e) { showErr('update: ' + e.message, e.stack); }
+  }
+
+  try {
+    // suivi souple : la caméra glisse pour la garder dans le cadre (tu peux toujours orbiter)
+    if (vrm){
+      // z : 1 = plan large (cible à la poitrine), 0 = très près (cible au visage)
+      const camDist = camera.position.distanceTo(controls.target);
+      const zn = THREE.MathUtils.clamp((camDist - fitDist * 0.45) / (fitDist * 0.55), 0, 1);
+      const aimTy = THREE.MathUtils.lerp(refH * 0.90, aimY, zn);
+      followTmp.set(brain.pos.x, aimTy, brain.pos.z);
+      controls.target.lerp(followTmp, 1 - Math.exp(-dt * 6));
+    }
+    controls.update();
+    renderer.render(scene, camera);
+    frames++;
+    if (now - fpsT > 800){ fps = Math.round(frames * 1000 / (now - fpsT)); frames = 0; fpsT = now; }
+  } catch (e) { showErr('render: ' + e.message, e.stack); }
+}
+
+animate();
+</script>
+</body>
+</html>

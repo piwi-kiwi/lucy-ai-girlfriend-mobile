@@ -1,0 +1,19 @@
+# secrets
+llm.json
+
+# big local assets
+*.vrm
+anim/
+kokoro/
+ggml-*.bin
+whisper-cli
+build/
+gallery/
+
+# runtime
+voice/
+server.log
+server.pid
+__pycache__/
+*.pyc
+_check.mjs

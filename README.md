@@ -1,5 +1,9 @@
 # Lucy — AI girlfriend for mobile
 
+*For nerds and the pleasantly unhinged. You need a VRM rig, a Mixamo export, a compiled
+whisper, an espeak shared library and an LLM key. If that sentence sounded fun instead of
+exhausting, you are exactly who this is for.*
+
 Self-hosted 3D VRM avatar running in the phone browser. The character animates on her
 own (idle, walk, blinking, gaze), lip-syncs to synthesized speech, and answers through
 an LLM that also drives her face and gestures with inline tags.

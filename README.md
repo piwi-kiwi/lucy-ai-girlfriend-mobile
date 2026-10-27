@@ -6,6 +6,8 @@ an LLM that also drives her face and gestures with inline tags.
 
 No build step. Python standard library server, three.js + @pixiv/three-vrm on the client.
 
+![Lucy running in the phone browser](docs/preview.jpg)
+
 ## Features
 
 - Mixamo animation retargeted onto any humanoid VRM (VRM 0.x and 1.0)
